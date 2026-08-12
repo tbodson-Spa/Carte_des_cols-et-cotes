@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Carte des Cols Interactive</title>
+
+  <!-- Leaflet CSS & JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; height: 100vh; background: #f4f6f8; color: #333; }
+    #sidebar { width: 380px; height: 100%; background: #ffffff; border-right: 1px solid #e0e0e0; display: flex; flex-direction: column; z-index: 1000; box-shadow: 2px 0 8px rgba(0,0,0,0.05); }
+    
+    .header { padding: 16px; background: #1e293b; color: white; }
+    .header h1 { font-size: 1.2rem; font-weight: 600; margin-bottom: 4px; }
+    .header p { font-size: 0.8rem; color: #94a3b8; }
+    
+    .status-bar { padding: 8px 16px; background: #f0fdf4; border-bottom: 1px solid #dcfce7; color: #166534; font-size: 0.8rem; display: flex; justify-content: space-between; align-items: center; }
+    .btn-refresh { background: #166534; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 0.75rem; font-weight: 600; }
+    .btn-refresh:hover { background: #15803d; }
+
+    .controls { padding: 12px 16px; border-bottom: 1px solid #f1f5f9; background: #f8fafc; }
+    .search-box { width: 100%; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.9rem; margin-bottom: 8px; outline: none; }
+    .filter-group { display: flex; gap: 8px; }
+    select { flex: 1; padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.85rem; background: white; }
+    
+    .col-list { flex: 1; overflow-y: auto; padding: 8px; }
+    .col-item { padding: 10px 12px; border-radius: 6px; margin-bottom: 6px; background: white; border: 1px solid #e2e8f0; cursor: pointer; transition: all 0.15s ease; }
+    .col-item:hover { border-color: #2563eb; background: #f0f6ff; }
+    .col-title { font-weight: 600; font-size: 0.95rem; color: #0f172a; display: flex; justify-content: space-between; align-items: center; }
+    .col-badge { font-size: 0.75rem; padding: 2px 6px; border-radius: 4px; font-weight: 600; color: white; }
+    .badge-hc { background: #dc2626; }
+    .badge-1 { background: #ea580c; }
+    .badge-2 { background: #16a34a; }
+    .col-meta { font-size: 0.8rem; color: #64748b; margin-top: 4px; }
+    .strava-link { display: inline-block; margin-top: 6px; font-size: 0.75rem; color: #fc4c02; font-weight: 600; text-decoration: none; }
+    
+    #map { flex: 1; height: 100%; }
+
+    .popup-title { font-size: 1.05rem; font-weight: 700; margin-bottom: 6px; color: #0f172a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; }
+    .popup-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; font-size: 0.85rem; margin-top: 8px; }
+    .popup-label { color: #64748b; font-size: 0.75rem; text-transform: uppercase; }
+    .popup-val { font-weight: 600; color: #1e293b; }
+    .strava-btn { display: block; text-align: center; background: #fc4c02; color: white !important; font-weight: 600; font-size: 0.8rem; padding: 6px 10px; border-radius: 4px; margin-top: 10px; text-decoration: none; }
+  </style>
+</head>
+<body>
+
+  <div id="sidebar">
+    <div class="header">
+      <h1>Carte des Cols</h1>
+      <p id="counter">Connexion à Google Sheets...</p>
+    </div>
+
+    <div class="status-bar">
+      <span>🟢 Synchro Google Sheets</span>
+      <button class="btn-refresh" onclick="loadGoogleSheetData()">🔄 Actualiser</button>
+    </div>
+
+    <div class="controls">
+      <input type="text" id="searchInput" class="search-box" placeholder="Rechercher un col, massif, pays..." />
+      <div class="filter-group">
+        <select id="countryFilter"><option value="">Tous les pays</option></select>
+        <select id="catFilter"><option value="">Toutes difficultés</option></select>
+      </div>
+    </div>
+
+    <div class="col-list" id="colList"></div>
+  </div>
+
+  <div id="map"></div>
+
+  <script>
+    const SHEET_ID = "19IIr9j8v-JFt_b1X8Cc2Id9zkfiLhyT5VrmD1lT7xJo"; 
+    const SHEET_GID = "612046378";
+
+    let colsData = [];
+    let markers = [];
+
+    const map = L.map('map').setView([45.5, 3.5], 6);
+    
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+      maxZoom: 19,
+      subdomains: 'abcd',
+      attribution: '&copy; OpenStreetMap &copy; CARTO'
+    }).addTo(map);
+
+    function parseCoord(val) {
+      if (val === undefined || val === null || val === "") return NaN;
+      let cleaned = val.toString().replace(',', '.').trim();
+      return parseFloat(cleaned);
+    }
+
+    function parseStravaId(val) {
+      if (!val) return "";
+      let str = val.toString().trim();
+      let match = str.match(/segments\/(\d+)/);
+      if (match) return match[1];
+      return str.replace(/\D/g, '');
+    }
+
+    function getCellValue(cell) {
+      if (!cell) return "";
+      if (cell.v !== undefined && cell.v !== null) return cell.v;
+      if (cell.f !== undefined && cell.f !== null) return cell.f;
+      return "";
+    }
+
+    // Formate proprement la pente
+    function formatSlope(val) {
+      if (!val) return "";
+      let str = val.toString().trim();
+      let num = parseFloat(str.replace(',', '.'));
+      
+      if (isNaN(num)) return str;
+
+      // Si Google Sheets renvoie une décimale comme 0.096 ou 0.089
+      if (num > 0 && num < 1) {
+        num = num * 100;
+      }
+
+      // Arrondi à une décimale (ex: 9.6 % ou 8.9 %)
+      return (Math.round(num * 10) / 10).toString().replace('.', ',') + ' %';
+    }
+
+    window.googleSheetCallback = function(json) {
+      if (!json || !json.table || !json.table.rows) {
+        document.getElementById('counter').textContent = "Erreur : Données introuvables. Vérifiez le partage du fichier.";
+        return;
+      }
+
+      const rows = json.table.rows;
+
+      colsData = rows.map(r => {
+        if (!r.c) return null;
+
+        const name = getCellValue(r.c[0]);
+        const alt = getCellValue(r.c[1]);
+        const len = getCellValue(r.c[2]);
+        const pmoy = formatSlope(getCellValue(r.c[3]));
+        const den = getCellValue(r.c[4]);
+        const massif = getCellValue(r.c[5]);
+        const country = getCellValue(r.c[6]);
+        const cat = getCellValue(r.c[7]);
+        const lat = parseCoord(getCellValue(r.c[8]));
+        const lng = parseCoord(getCellValue(r.c[9]));
+        const strava = parseStravaId(getCellValue(r.c[10]));
+
+        if (!name || isNaN(lat) || isNaN(lng)) return null;
+
+        return { name, alt, len, pmoy, den, massif, country, cat, lat, lng, strava };
+      }).filter(c => c !== null);
+
+      populateFilters();
+      renderMapAndList();
+    };
+
+    function loadGoogleSheetData() {
+      document.getElementById('counter').textContent = "Mise à jour des cols...";
+
+      const oldScript = document.getElementById('gviz-jsonp');
+      if (oldScript) oldScript.remove();
+
+      const script = document.createElement('script');
+      script.id = 'gviz-jsonp';
+      script.src = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?gid=${SHEET_GID}&tqx=responseHandler:googleSheetCallback&t=${new Date().getTime()}`;
+
+      script.onerror = function() {
+        document.getElementById('counter').textContent = "Erreur de chargement. Vérifiez les droits de partage.";
+      };
+
+      document.body.appendChild(script);
+    }
+
+    function getCategoryColor(cat) {
+      if (!cat) return '#16a34a';
+      const c = cat.toString().toLowerCase();
+      if (c.includes('hc')) return '#dc2626';
+      if (c.includes('1')) return '#ea580c';
+      return '#16a34a';
+    }
+
+    function getCategoryBadgeClass(cat) {
+      if (!cat) return 'badge-2';
+      const c = cat.toString().toLowerCase();
+      if (c.includes('hc')) return 'badge-hc';
+      if (c.includes('1')) return 'badge-1';
+      return 'badge-2';
+    }
+
+    function populateFilters() {
+      const countries = [...new Set(colsData.map(c => c.country))].filter(Boolean).sort();
+      const categories = [...new Set(colsData.map(c => c.cat))].filter(Boolean).sort();
+
+      const countrySelect = document.getElementById('countryFilter');
+      countrySelect.innerHTML = '<option value="">Tous les pays</option>';
+      countries.forEach(c => countrySelect.innerHTML += `<option value="${c}">${c}</option>`);
+
+      const catSelect = document.getElementById('catFilter');
+      catSelect.innerHTML = '<option value="">Toutes difficultés</option>';
+      categories.forEach(c => catSelect.innerHTML += `<option value="${c}">${c}</option>`);
+    }
+
+    function renderMapAndList() {
+      markers.forEach(m => map.removeLayer(m));
+      markers = [];
+
+      const listContainer = document.getElementById('colList');
+      listContainer.innerHTML = '';
+
+      const searchText = document.getElementById('searchInput').value.toLowerCase();
+      const selectedCountry = document.getElementById('countryFilter').value;
+      const selectedCat = document.getElementById('catFilter').value;
+
+      const filteredCols = colsData.filter(c => {
+        const matchesSearch = c.name.toString().toLowerCase().includes(searchText) || 
+                              c.massif.toString().toLowerCase().includes(searchText) || 
+                              c.country.toString().toLowerCase().includes(searchText) ||
+                              (c.strava && c.strava.toString().includes(searchText));
+        const matchesCountry = !selectedCountry || c.country === selectedCountry;
+        const matchesCat = !selectedCat || c.cat === selectedCat;
+        return matchesSearch && matchesCountry && matchesCat;
+      });
+
+      document.getElementById('counter').textContent = `${filteredCols.length} cols affichés (${colsData.length} au total)`;
+
+      const bounds = [];
+
+      filteredCols.forEach(col => {
+        const coords = [col.lat, col.lng];
+
+        const item = document.createElement('div');
+        item.className = 'col-item';
+        item.innerHTML = `
+          <div class="col-title">
+            <span>${col.name}</span>
+            ${col.cat ? `<span class="col-badge ${getCategoryBadgeClass(col.cat)}">${col.cat}</span>` : ''}
+          </div>
+          <div class="col-meta">
+            ${col.alt ? col.alt + 'm alt. | ' : ''}${col.len ? col.len + ' km | ' : ''}${col.den ? col.den + 'm D+ | ' : ''}${col.pmoy ? col.pmoy + ' | ' : ''} ${col.massif} ${col.country ? '(' + col.country + ')' : ''}
+          </div>
+          ${col.strava ? `<a href="https://www.strava.com/segments/${col.strava}" target="_blank" class="strava-link" onclick="event.stopPropagation()">Segment Strava #${col.strava} ↗</a>` : ''}
+        `;
+
+        item.addEventListener('click', () => {
+          map.flyTo(coords, 12);
+          marker.openPopup();
+        });
+
+        listContainer.appendChild(item);
+
+        const markerColor = getCategoryColor(col.cat);
+        const customIcon = L.divIcon({
+          className: 'custom-pin',
+          html: `<div style="background-color: ${markerColor}; width: 14px; height: 14px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.4);"></div>`,
+          iconSize: [14, 14],
+          iconAnchor: [7, 7]
+        });
+
+        const marker = L.marker(coords, { icon: customIcon }).addTo(map);
+
+        const popupContent = `
+          <div class="popup-title">${col.name}</div>
+          <div class="popup-grid">
+            <div><span class="popup-label">Altitude</span><br><span class="popup-val">${col.alt ? col.alt + ' m' : '-'}</span></div>
+            <div><span class="popup-label">Difficulté</span><br><span class="popup-val">${col.cat || '-'}</span></div>
+            <div><span class="popup-label">Distance</span><br><span class="popup-val">${col.len ? col.len + ' km' : '-'}</span></div>
+            <div><span class="popup-label">Dénivelé</span><br><span class="popup-val">${col.den ? col.den + ' m' : '-'}</span></div>
+            <div><span class="popup-label">Pente moy.</span><br><span class="popup-val">${col.pmoy || '-'}</span></div>
+            <div><span class="popup-label">Massif / Pays</span><br><span class="popup-val">${col.massif}${col.country ? ' (' + col.country + ')' : ''}</span></div>
+          </div>
+          ${col.strava ? `<a href="https://www.strava.com/segments/${col.strava}" target="_blank" class="strava-btn">Voir le segment Strava ↗</a>` : ''}
+        `;
+
+        marker.bindPopup(popupContent);
+        markers.push(marker);
+        bounds.push(coords);
+      });
+
+      if (bounds.length > 0) {
+        map.fitBounds(bounds, { padding: [30, 30] });
+      }
+    }
+
+    document.getElementById('searchInput').addEventListener('input', renderMapAndList);
+    document.getElementById('countryFilter').addEventListener('change', renderMapAndList);
+    document.getElementById('catFilter').addEventListener('change', renderMapAndList);
+
+    loadGoogleSheetData();
+  </script>
+</body>
+</html>
